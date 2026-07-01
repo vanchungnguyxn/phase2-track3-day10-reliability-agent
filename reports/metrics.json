@@ -1,0 +1,85 @@
+{
+  "total_requests": 300,
+  "availability": 0.99,
+  "error_rate": 0.01,
+  "latency_p50_ms": 289.14,
+  "latency_p95_ms": 318.39,
+  "latency_p99_ms": 319.59,
+  "fallback_success_rate": 0.9538,
+  "cache_hit_rate": 0.7167,
+  "circuit_open_count": 4,
+  "recovery_time_ms": null,
+  "estimated_cost": 0.034114,
+  "estimated_cost_saved": 0.1075,
+  "scenarios": {
+    "primary_timeout_100": "pass",
+    "primary_flaky_50": "pass",
+    "all_healthy": "pass"
+  },
+  "scenario_details": {
+    "primary_timeout_100": {
+      "status": "pass",
+      "reason": "availability=97.00% (need >=95%), fallback_success_rate=92.50% (need >=90%)",
+      "description": "Primary provider fails 100% — all traffic should fallback",
+      "availability": 0.97,
+      "fallback_success_rate": 0.925,
+      "cache_hit_rate": 0.6,
+      "circuit_open_count": 2,
+      "recovery_time_ms": null
+    },
+    "primary_flaky_50": {
+      "status": "pass",
+      "reason": "availability=100.00% (need >=75%), circuit_opens=1 (need >=1)",
+      "description": "Primary provider fails 50% — circuit should oscillate",
+      "availability": 1.0,
+      "fallback_success_rate": 1.0,
+      "cache_hit_rate": 0.78,
+      "circuit_open_count": 1,
+      "recovery_time_ms": null
+    },
+    "all_healthy": {
+      "status": "pass",
+      "reason": "availability=100.00% (need >=90%)",
+      "description": "Baseline — both providers healthy",
+      "availability": 1.0,
+      "fallback_success_rate": 1.0,
+      "cache_hit_rate": 0.77,
+      "circuit_open_count": 1,
+      "recovery_time_ms": null
+    }
+  },
+  "cache_comparison": {
+    "without_cache": {
+      "total_requests": 100,
+      "availability": 0.98,
+      "error_rate": 0.02,
+      "latency_p50_ms": 233.1,
+      "latency_p95_ms": 306.46,
+      "latency_p99_ms": 316.33,
+      "fallback_success_rate": 0.9487,
+      "cache_hit_rate": 0.0,
+      "circuit_open_count": 1,
+      "recovery_time_ms": 2252.6254653930664,
+      "estimated_cost": 0.049366,
+      "estimated_cost_saved": 0.0,
+      "scenarios": {}
+    },
+    "with_cache": {
+      "total_requests": 100,
+      "availability": 1.0,
+      "error_rate": 0.0,
+      "latency_p50_ms": 224.38,
+      "latency_p95_ms": 305.67,
+      "latency_p99_ms": 314.18,
+      "fallback_success_rate": 1.0,
+      "cache_hit_rate": 0.73,
+      "circuit_open_count": 0,
+      "recovery_time_ms": null,
+      "estimated_cost": 0.013158,
+      "estimated_cost_saved": 0.0365,
+      "scenarios": {}
+    }
+  },
+  "concurrent_workers": 4,
+  "cache_backend": "redis"
+}

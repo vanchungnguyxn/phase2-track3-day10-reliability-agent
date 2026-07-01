@@ -1,329 +1,261 @@
 # Day 10 Lab — Reliability Engineering for Production Agents
 
-Build a production-style reliability layer for an LLM agent gateway. The starter repo provides core architecture, interfaces, tests, and TODO zones — you implement all the reliability logic from scratch.
+| | |
+|---|---|
+| **Họ và tên** | Nguyễn Văn Chung |
+| **Mã sinh viên** | 2A202600647 |
+| **Track** | Phase 2 — Track 3 — Day 10 |
+| **Đề tài** | Reliability layer cho LLM agent gateway |
+| **Trạng thái** | Hoàn thành |
 
-## Learning goals
+---
 
-By the end, you should be able to:
+## Tổng quan
 
-1. Implement a circuit breaker 3-state machine (CLOSED → OPEN → HALF_OPEN → CLOSED).
-2. Route requests through a cache → circuit breaker → provider fallback chain.
-3. Build semantic cache with n-gram similarity, privacy guardrails, and false-hit detection.
-4. Implement a shared Redis cache for multi-instance deployments using Docker.
-5. Run chaos scenarios and capture metrics: availability, error rate, P50/P95/P99 latency, fallback success rate, cache hit rate, recovery time, and estimated cost saved.
-6. Produce a reproducible report graded from evidence, not opinion.
+Project xây dựng **lớp reliability kiểu production** cho một LLM agent gateway: circuit breaker 3 trạng thái, semantic cache (in-memory + Redis), chuỗi fallback provider, chaos testing và observability metrics.
 
-## Time design
+Toàn bộ logic reliability được implement trong `src/reliability_lab/`. Provider dùng `FakeLLMProvider` — **không cần API key thật**, mô phỏng latency, failure rate và cost cục bộ.
 
-Total lab time: **4–5 hours**.
+### Mục tiêu đạt được
 
-| Time | Milestone | Deliverable |
-|---:|---|---|
-| 0–30 min | Setup, run tests, read all TODOs | Test log showing 25 failures + 7 xfail |
-| 30–90 min | Circuit breaker: `allow_request()`, `call()`, `record_success()`, `record_failure()` | 11 CB tests passing |
-| 90–150 min | Cache: `similarity()`, `get()`, `set()` with n-gram cosine + guardrails | 9 cache tests passing |
-| 150–195 min | Gateway: `complete()` — cache → breaker → fallback chain | 4 gateway tests passing |
-| 195–240 min | Chaos: `run_scenario()`, `calculate_recovery_time_ms()`, metrics CSV export | `reports/metrics.json` |
-| 240–270 min | Redis shared cache: `SharedRedisCache.get()` / `set()` | Redis tests passing |
-| 270–300 min | Load test + final report | Final report + metrics JSON/CSV |
+1. Circuit breaker **CLOSED → OPEN → HALF_OPEN → CLOSED** với transition log.
+2. Pipeline gateway: **cache → circuit breaker → provider fallback → static fallback**.
+3. Semantic cache với **n-gram cosine similarity**, privacy guardrails và false-hit detection.
+4. **Shared Redis cache** cho multi-instance deployment (Docker).
+5. Chaos scenarios (3+) với pass/fail criteria, concurrent load, cache A/B comparison.
+6. Metrics **JSON + CSV** và báo cáo `final_report.md` dựa trên số liệu thực tế.
 
-## Quickstart
+---
+
+## Kiến trúc hệ thống
+
+```
+User Request
+    |
+    v
+[ReliabilityGateway]
+    |
+    +---> [SharedRedisCache.get()] -- HIT? --> return (route=cache_hit:score, cost=0)
+    |              |
+    |              v MISS
+    +---> [CircuitBreaker: primary] --> FakeLLMProvider(primary)
+    |         | OPEN / ProviderError
+    |         v
+    +---> [CircuitBreaker: backup]  --> FakeLLMProvider(backup)
+    |         | all failed
+    |         v
+    +---> [Static fallback message]
+```
+
+| Layer | File | Mô tả |
+|---|---|---|
+| Gateway | `gateway.py` | Điều phối cache → breaker → fallback chain |
+| Circuit breaker | `circuit_breaker.py` | State machine 3 trạng thái, fail-fast khi OPEN |
+| Cache | `cache.py` | `ResponseCache` (in-memory) + `SharedRedisCache` (Redis HSET/SCAN) |
+| Chaos | `chaos.py` | Scenarios, concurrent load, pass/fail criteria, cache comparison |
+| Metrics | `metrics.py` | P50/P95/P99, availability, JSON/CSV export |
+| Config | `config.py` | Pydantic loader từ YAML |
+| Providers | `providers.py` | Fake LLM — latency, failure, cost simulation |
+
+---
+
+## Cấu hình chính (`configs/default.yaml`)
+
+| Tham số | Giá trị | Lý do |
+|---|---:|---|
+| `failure_threshold` | 3 | Tránh circuit flip quá nhạy với lỗi ngẫu nhiên |
+| `reset_timeout_seconds` | 2 | Probe HALF_OPEN nhanh, phù hợp lab |
+| `success_threshold` | 1 | Một probe thành công đủ để đóng circuit |
+| `cache.ttl_seconds` | 300 | Cân bằng freshness vs hit rate |
+| `cache.similarity_threshold` | 0.92 | Kết hợp false-hit guard cho query có năm/ID khác nhau |
+| `cache.backend` | `redis` | Shared state giữa nhiều gateway instance |
+| `load_test.requests` | 100 | Đủ mẫu cho percentile ổn định |
+| `load_test.concurrent_workers` | 4 | Load song song, stress circuit breaker |
+
+### Chaos scenarios
+
+| Scenario | Mô tả | Tiêu chí pass |
+|---|---|---|
+| `primary_timeout_100` | Primary fail 100% → fallback backup | availability ≥ 95%, fallback_rate ≥ 90% |
+| `primary_flaky_50` | Primary fail 50% → circuit oscillate | availability ≥ 75%, circuit_opens ≥ 1 |
+| `all_healthy` | Baseline cả hai provider healthy | availability ≥ 90% |
+
+---
+
+## Kết quả chạy thực tế
+
+Nguồn: `reports/metrics.json` — sinh bởi `make run-chaos` (Redis backend, 4 workers).
+
+| Metric | Giá trị |
+|---|---:|
+| total_requests | 300 |
+| availability | 99.00% |
+| error_rate | 1.00% |
+| latency_p50_ms | 289.14 |
+| latency_p95_ms | 318.39 |
+| latency_p99_ms | 319.59 |
+| fallback_success_rate | 95.38% |
+| cache_hit_rate | 71.67% |
+| circuit_open_count | 4 |
+| estimated_cost_saved | 0.1075 |
+
+**Tất cả 3 chaos scenarios: pass.**
+
+Chi tiết đầy đủ: [`reports/final_report.md`](reports/final_report.md)
+
+---
+
+## Cài đặt và chạy
+
+### Yêu cầu
+
+- Python ≥ 3.10
+- Docker (cho Redis shared cache)
+- `pip install -e ".[dev]"`
+
+### Quickstart
 
 ```bash
-# Option A: conda
-conda activate ai-lab
+# Cài dependencies
 pip install -e ".[dev]"
 
-# Option B: venv
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-
-# Start Redis for shared cache (requires Docker)
+# Khởi động Redis
 make docker-up
 
-# Run tests — 25 will FAIL until you implement TODOs
+# Chạy toàn bộ test (cần Redis đang chạy)
 make test
 
-# Run chaos simulation (requires gateway + circuit breaker + cache implemented)
+# Chạy chaos simulation → metrics.json + metrics.csv
 make run-chaos
 
-# Generate report from metrics
+# (Tuỳ chọn) Tạo report tự động từ metrics
 make report
 ```
 
-## What you need to implement
+### Windows — lưu ý pytest
 
-### Overview: 25 failing tests → 0 failures
+Nếu pytest lỗi do plugin global (`deepeval`), chạy:
 
-Run `make test` to see all 25 failing tests. Each maps to a TODO in source code. Fix TODOs → tests pass.
-
-```
-tests/test_circuit_breaker.py  — 11 tests (circuit breaker state machine)
-tests/test_cache.py            — 9 tests  (cache similarity, privacy, false-hit)
-tests/test_gateway_contract.py — 4 tests  (gateway routing pipeline)
-tests/test_todo_requirements.py — 7 xfail (pass when all TODOs done)
-tests/test_config.py           — 2 tests  (already passing)
-tests/test_metrics.py          — 2 tests  (already passing)
-tests/test_redis_cache.py      — 6 tests  (skipped until Redis running)
+```powershell
+$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+python -m pytest tests/ -v
 ```
 
-### File-by-file TODO map
+### Kiểm tra Redis shared cache
 
-| File | Methods to implement | Tests |
-|---|---|---|
-| `circuit_breaker.py` | `allow_request()`, `call()`, `record_success()`, `record_failure()` | 11 in test_circuit_breaker.py |
-| `cache.py` | `ResponseCache.similarity()`, `ResponseCache.get()`, `ResponseCache.set()` | 9 in test_cache.py |
-| `cache.py` | `SharedRedisCache.get()`, `SharedRedisCache.set()` | 6 in test_redis_cache.py |
-| `gateway.py` | `ReliabilityGateway.complete()` | 4 in test_gateway_contract.py |
-| `chaos.py` | `run_scenario()`, `calculate_recovery_time_ms()` | Via run-chaos |
-| `metrics.py` | `write_csv()` | 1 in test_todo_requirements.py |
+```bash
+# Test shared state giữa 2 instance
+pytest tests/test_redis_cache.py::test_shared_state_across_instances -v
 
-## Repository structure
+# Xem keys trong Redis sau chaos run
+docker compose exec redis redis-cli KEYS "rl:cache:*"
+```
+
+---
+
+## Cấu trúc repository
 
 ```
 src/reliability_lab/
-  circuit_breaker.py   # TODO: implement 4 methods — full state machine from scratch
-  cache.py             # TODO: implement similarity (n-gram cosine), get/set with guardrails,
-                       #       SharedRedisCache get/set for Redis backend
-  gateway.py           # TODO: implement complete() — cache → breaker → fallback pipeline
-  chaos.py             # TODO: implement run_scenario(), calculate_recovery_time_ms()
-  metrics.py           # TODO: implement write_csv() export
-  providers.py         # FakeLLMProvider — simulates latency/failures/cost (NO changes needed)
-  config.py            # Pydantic config loader (NO changes needed)
-
-scripts/
-  run_chaos.py         # CLI entry point for chaos simulation
-  generate_report.py   # Generates report from metrics JSON
+  circuit_breaker.py   # State machine CLOSED / OPEN / HALF_OPEN
+  cache.py             # ResponseCache + SharedRedisCache
+  gateway.py           # Pipeline cache → breaker → fallback
+  chaos.py             # Scenarios, concurrent load, cache A/B, pass/fail
+  metrics.py           # RunMetrics, percentile, JSON/CSV export
+  providers.py         # FakeLLMProvider
+  config.py            # Pydantic config loader
 
 configs/
-  default.yaml         # Provider fail rates, CB thresholds, cache settings, chaos scenarios
+  default.yaml         # Providers, CB, cache, scenarios, load test
 
-tests/                 # Your target — make all tests green
-  test_circuit_breaker.py    # 11 tests for 3-state machine
-  test_cache.py              # 9 tests for similarity + guardrails
-  test_gateway_contract.py   # 4 tests for routing pipeline
-  test_todo_requirements.py  # 7 xfail markers — all should unexpectedly PASS when done
-  test_redis_cache.py        # 6 Redis tests — skipped if Redis not running
-  test_config.py             # 2 tests (already passing)
-  test_metrics.py            # 2 tests (already passing)
+scripts/
+  run_chaos.py         # CLI chaos → reports/metrics.json + .csv
+  generate_report.py   # CLI tạo report từ metrics JSON
+
+tests/
+  test_circuit_breaker.py    # 12 tests
+  test_cache.py              # 9 tests
+  test_gateway_contract.py   # 4 tests
+  test_redis_cache.py        # 6 tests (cần Redis)
+  test_todo_requirements.py  # 7 xfail → XPASS khi hoàn thành
+  test_config.py             # 2 tests
+  test_metrics.py            # 2 tests
 
 data/
-  sample_queries.jsonl  # 20 queries with risk labels (privacy, technical, faq, dated)
+  sample_queries.jsonl       # 20 queries (privacy, technical, faq, dated)
 
-docker-compose.yml     # Local Redis for shared cache
 reports/
-  report_template.md   # Copy and fill in for final report
+  metrics.json               # Metrics + scenario details + cache comparison
+  metrics.csv                # CSV export một dòng
+  final_report.md            # Báo cáo đầy đủ (architecture, SLO, Redis evidence)
+  report_template.md         # Template gốc của lab
+
+docker-compose.yml           # Redis 7 Alpine
 ```
 
 ---
 
-## Step-by-step guide
+## Deliverables nộp bài
 
-### Phase 1: Circuit Breaker (30–90 min) — 25 points
+| # | File | Mô tả |
+|---|---|---|
+| 1 | `src/reliability_lab/` | Source code đã implement đầy đủ |
+| 2 | `reports/metrics.json` | Metrics từ `make run-chaos` |
+| 3 | `reports/metrics.csv` | CSV export |
+| 4 | `reports/final_report.md` | Báo cáo đầy đủ sections |
+| 5 | `docker-compose.yml` | Redis cho grader |
+| 6 | Test log | `35 passed, 7 xpassed` (gồm Redis tests) |
 
-Implement 4 methods in `circuit_breaker.py`. Each has detailed TODO comments with exact logic.
+### Lệnh grader chạy
 
-**`allow_request()`** — State-based gate:
-- CLOSED → always allow
-- HALF_OPEN → allow (probe request)
-- OPEN → check if `reset_timeout_seconds` elapsed since `opened_at`; if yes, transition to HALF_OPEN and allow; if no, deny
-
-**`call(fn, *args, **kwargs)`** — Wrapper:
-- Check `allow_request()` → raise `CircuitOpenError` if denied
-- Try `fn(*args, **kwargs)` → `record_success()` on success, `record_failure()` + re-raise on exception
-
-**`record_success()`** — Counter logic:
-- Reset `failure_count` to 0, increment `success_count`
-- If HALF_OPEN and `success_count >= success_threshold` → transition to CLOSED
-
-**`record_failure()`** — **Tricky part** (most common student mistake):
-- Increment `failure_count`, reset `success_count` to 0
-- If HALF_OPEN → immediately re-open with reason `"probe_failure"` (separate from threshold)
-- Elif `failure_count >= failure_threshold` → open with reason `"failure_threshold_reached"`
-- These MUST be `if/elif`, NOT combined with `or` — different reasons for different triggers
-
-**Verify:** `pytest tests/test_circuit_breaker.py -v` → 11/11 passing
-
----
-
-### Phase 2: Cache (90–150 min) — 15 points
-
-Implement 3 methods in `cache.py` `ResponseCache` class.
-
-**`similarity(a, b)`** — Cosine similarity over character n-grams + word tokens:
-1. If `a == b`, return 1.0
-2. Tokenize: split into words + character 3-grams (e.g., `"hello"` → `["hello", "hel", "ell", "llo"]`)
-3. Build `Counter` vectors from tokens
-4. Compute cosine: `dot(a,b) / (|a| × |b|)` using `math.sqrt`
-
-You need to add imports: `from collections import Counter` and `import math`.
-
-**`get(query)`** — Lookup with guardrails:
-1. Return `(None, 0.0)` if `_is_uncacheable(query)` — privacy check
-2. Evict expired entries (check `time.time() - created_at > ttl_seconds`)
-3. Find best match via `self.similarity(query, entry.key)`
-4. If score >= threshold: check `_looks_like_false_hit()` → log and reject if true
-5. Return `(value, score)` or `(None, score)`
-
-You need to add `self.false_hit_log: list[dict[str, object]] = []` in `__init__`.
-
-**`set(query, value, metadata)`** — Store with privacy guard:
-1. Return immediately if `_is_uncacheable(query)`
-2. Append `CacheEntry` to `self._entries`
-
-**Verify:** `pytest tests/test_cache.py -v` → 9/9 passing
-
----
-
-### Phase 3: Gateway (150–195 min) — 25 points
-
-Implement `complete(prompt)` in `gateway.py`. Detailed pipeline:
-
-1. **Cache check** → if cache exists, try `cache.get(prompt)`. On hit, return `GatewayResponse` with `route=f"cache_hit:{score:.2f}"`, `cache_hit=True`
-2. **Provider chain** → iterate `self.providers`:
-   - Get breaker: `self.breakers[provider.name]`
-   - Call via breaker: `breaker.call(provider.complete, prompt)`
-   - On success: cache result, determine route (`"primary"` for first provider, `"fallback"` for rest), return response
-   - On `ProviderError` or `CircuitOpenError`: save error string, continue
-3. **Static fallback** → all providers failed: return degraded message with `route="static_fallback"`, `error=last_error`
-
-**Verify:** `pytest tests/test_gateway_contract.py -v` → 4/4 passing
-
----
-
-### Phase 4: Chaos + Metrics (195–240 min) — 15 points
-
-**`run_scenario()`** in `chaos.py` — Run N requests through gateway, collect metrics:
-- Build gateway with `build_gateway(config, scenario.provider_overrides)`
-- Loop `config.load_test.requests` times, pick random query, call `gateway.complete()`
-- Track: total, success/fail, cache hits, fallback counts, latencies, cost
-- Count circuit open transitions from breaker logs
-
-**`calculate_recovery_time_ms()`** — Walk transition logs:
-- Find pairs: `to="open"` → `to="closed"`, compute delta in ms
-- Return average, or None if no recovery
-
-**`write_csv()`** in `metrics.py` — Export:
-- Flatten `to_report_dict()`, expand scenarios as `scenario_{name}` columns
-- Write single-row CSV with `csv.DictWriter`
-
-**Verify:** `make run-chaos` produces `reports/metrics.json`
-
----
-
-### Phase 5: Redis Shared Cache (240–270 min) — 15 points
-
-Start Redis: `make docker-up`
-
-Implement `SharedRedisCache.get()` and `set()` in `cache.py`:
-
-**`set(query, value)`:**
-1. Skip if `_is_uncacheable(query)`
-2. Build key: `f"{self.prefix}{self._query_hash(query)}"`
-3. `self._redis.hset(key, mapping={"query": query, "response": value})`
-4. `self._redis.expire(key, self.ttl_seconds)`
-
-**`get(query)`:**
-1. Skip if uncacheable
-2. Try exact match: `hget(exact_key, "response")` → return `(response, 1.0)`
-3. Similarity scan: `scan_iter(prefix*)`, `hget` each `"query"` field, compute `ResponseCache.similarity()`, find best above threshold
-4. Apply false-hit check before returning
-
-**Verify:** `pytest tests/test_redis_cache.py -v` → 6/6 passing
-
-Switch config to `backend: redis` and re-run chaos to verify Redis-backed cache works.
-
----
-
-### Phase 6: Report (270–300 min) — 15 points
-
-Copy `reports/report_template.md` → `reports/final_report.md`. Fill ALL sections:
-
-1. **Architecture diagram** — text/ASCII showing: User → Gateway → Cache → Circuit Breaker → Provider chain → Static fallback
-2. **Config table** — every parameter + rationale (e.g., "similarity_threshold: 0.92 — tested 0.85, got false hits on date queries")
-3. **Metrics** — paste from `metrics.json`, must include P50/P95/P99, availability, cache metrics
-4. **Chaos scenarios** — expected vs. observed, pass/fail per scenario
-5. **Cache comparison** — with vs. without cache (run twice, different config)
-6. **Redis evidence** — shared state proof, `KEYS` output
-7. **Failure analysis** — one remaining weakness + proposed fix
-
----
-
-## Rubric (100 points)
-
-| Category | Points | What graders check |
-|---|---:|---|
-| Circuit breaker & fallback | 25 | Correct 3-state machine, no retry storm, route reasons include provider name, transition log |
-| In-memory cache & cost | 15 | Hit rate measured, cost saved calculated, TTL/threshold justified, false-hit examples shown |
-| Redis shared cache | 15 | SharedRedisCache get/set implemented, shared state verified, privacy guardrails, Redis tests pass |
-| Observability & metrics | 15 | metrics.json has P50/P95/P99, availability, circuit open count, cache metrics, all reproducible |
-| Chaos & load testing | 15 | At least 3 named scenarios with pass/fail, recovery evidence, cache comparison |
-| Report & code quality | 15 | Architecture diagram, config table with justifications, failure analysis, type hints, tests pass |
-
----
-
-## Required deliverables
-
-Submit a zip or GitHub repo containing:
-
-1. **Source code** — all TODOs completed in `src/reliability_lab/`
-2. **`reports/metrics.json`** — generated by `make run-chaos`, reproducible
-3. **`reports/final_report.md`** — all sections filled
-4. **Test output** — screenshot/log of `make test` passing (with Redis running)
-5. **`docker-compose.yml`** — so grader can start Redis
-
-Grader runs:
 ```bash
 pip install -e ".[dev]"
 docker compose up -d
-make test         # all tests pass
-make run-chaos    # generates metrics
-make report       # generates report
+make test
+make run-chaos
 ```
 
 ---
 
-## Stretch goals (extra credit)
+## Implementation highlights
 
-- **Concurrency**: `ThreadPoolExecutor` in `run_simulation` — show metrics differ under concurrent load
-- **Redis circuit state**: Store breaker counters in Redis (INCR, EXPIRE) for multi-instance state sharing
-- **Redis graceful degradation**: Fall back to in-memory cache if Redis is down
-- **Cost-aware routing**: After budget hits 80%, route to cheaper model; at 100%, cache-only or static
-- **Property-based tests**: Use `hypothesis` to fuzz circuit breaker state transitions
-- **SLO table**: Define SLOs (availability >= 99%, P95 < 2.5s), check if system meets them
+### Circuit breaker (`circuit_breaker.py`)
+
+- `allow_request()`: CLOSED/HALF_OPEN cho phép; OPEN chờ `reset_timeout_seconds` rồi chuyển HALF_OPEN.
+- `record_failure()`: dùng `if/elif` — HALF_OPEN → `"probe_failure"`, CLOSED đạt threshold → `"failure_threshold_reached"`.
+- `call()`: fail-fast khi OPEN, không retry storm.
+
+### Semantic cache (`cache.py`)
+
+- `similarity()`: cosine trên word tokens + character 3-grams.
+- Privacy: regex chặn `password`, `balance`, `ssn`, ...
+- False-hit: từ chối khi 4-digit numbers khác nhau (năm, ID).
+- `SharedRedisCache`: HSET + EXPIRE, SCAN similarity lookup.
+
+### Chaos & metrics (`chaos.py`)
+
+- `ThreadPoolExecutor` với 4 workers cho concurrent load.
+- `evaluate_scenario_pass()`: tiêu chí pass/fail riêng từng scenario.
+- `run_cache_comparison()`: so sánh cache disabled vs Redis enabled.
+- Export JSON mở rộng: `scenario_details`, `cache_comparison`, `concurrent_workers`.
 
 ---
 
-## Common mistakes
+## Rubric mapping
 
-| Mistake | Points lost | How to avoid |
+| Hạng mục | Điểm | Evidence trong project |
 |---|---:|---|
-| Report has no numbers, only descriptions | Up to 20 | Always paste actual `metrics.json` values |
-| `record_failure()` uses `or` instead of `if/elif` | Up to 10 | HALF_OPEN and threshold need different reasons |
-| Cache returns wrong answers without guardrails | Up to 10 | Add privacy check + false-hit detection |
-| Similarity uses Jaccard instead of n-gram cosine | Up to 5 | Token overlap too crude — implement character n-grams |
-| Only 1 chaos scenario | Up to 10 | Implement 3+ scenarios with different failure modes |
-| Redis tests skipped | Up to 10 | Always `make docker-up` before `make test` |
-| Code doesn't run on grader's machine | Up to 15 | Test: fresh env → `pip install -e ".[dev]" && make test` |
-| No type hints | Up to 5 | Run `make typecheck` before submission |
+| Circuit breaker & fallback | 25 | `circuit_breaker.py`, `gateway.py`, 12 CB tests pass |
+| In-memory cache & cost | 15 | `ResponseCache`, false-hit log, cost_saved trong metrics |
+| Redis shared cache | 15 | `SharedRedisCache`, 6 Redis tests pass, KEYS evidence |
+| Observability & metrics | 15 | `metrics.json`, `metrics.csv`, P50/P95/P99 |
+| Chaos & load testing | 15 | 3 scenarios pass, concurrent load, cache A/B |
+| Report & code quality | 15 | `final_report.md` đầy đủ, type hints, tests pass |
 
-## FAQ
+---
 
-**Q: Do I need real API keys?**
-No. `FakeLLMProvider` simulates everything locally.
+## Tác giả
 
-**Q: What order should I implement things?**
-Circuit breaker → Cache → Gateway → Chaos/Metrics → Redis. Each layer builds on previous.
+**Nguyễn Văn Chung** — Mã SV: **2A202600647**
 
-**Q: What if I can't get Docker/Redis working?**
-Implement everything else first — Redis is 15 points. You can install Redis natively (`brew install redis` on Mac).
-
-**Q: Can I use external libraries?**
-Yes — add to `pyproject.toml`. Common: `scikit-learn` (TF-IDF), `hypothesis` (property tests).
-
-**Q: The `test_todo_requirements.py` tests are xfail — do they matter?**
-They flip to unexpected PASS when your code is correct. Graders check that xfails become passes.
-
-**Q: How do I know I'm done?**
-`make test` shows 0 failures (xfails that pass = good). `make run-chaos` produces valid `metrics.json`.
+Phase 2, Track 3, Day 10 — Reliability Engineering for Production Agents

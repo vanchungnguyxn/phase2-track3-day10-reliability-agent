@@ -4,5 +4,4 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 *.pyc
-reports/metrics.json
-reports/final_report.md
+# Deliverables (metrics.json, final_report.md) are tracked for grading.
